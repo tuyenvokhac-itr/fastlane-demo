@@ -1,0 +1,329 @@
+root_dir = Dir.pwd + "/.."
+flavor = ENV["BUILD_FLAVOR"]
+
+desc "Cloning the environment and keystore files into the local machine"
+lane :environments do |options|
+  debug = options[:debug] || false
+
+  repository_url = ENV['GIT_ENVIRONMENT_URL'] || prompt(text: "Enter the environment repository url: ")
+
+  temp_dir = root_dir + "/build/temp/keys"
+    
+  puts "Cloning..."
+  sh("rm -rf #{temp_dir} && mkdir -p #{temp_dir}", log: debug)
+  sh("git clone --depth=1 --branch=master #{repository_url} #{temp_dir}", log: debug)
+
+  password = ENV['GIT_ENVIRONMENT_DECRYPT_PASSWORD'] || prompt(text: "Enter the decryption password: ", secure_text: true)
+
+  puts "Decrypting and copying the .env files to the correct location..."
+  env_path = "#{temp_dir}/envs"
+  env_dest_path = root_dir
+  sh("openssl aes-256-cbc -k '#{password}' -in '#{env_path}/.env' -out '#{env_dest_path}/.env' -a -d", log: debug)
+  sh("openssl aes-256-cbc -k '#{password}' -in '#{env_path}/.env.staging' -out '#{env_dest_path}/.env.staging' -a -d", log: debug)
+  sh("openssl aes-256-cbc -k '#{password}' -in '#{env_path}/.env.production' -out '#{env_dest_path}/.env.production' -a -d", log: debug)
+
+  puts "Decrypting and copying the keystore files to the correct location..."
+  keystore_path = "#{temp_dir}/keystores"
+  keystore_dest_path = "#{root_dir}/android"
+  sh("openssl aes-256-cbc -k '#{password}' -in '#{keystore_path}/dev.keystore' -out '#{keystore_dest_path}/dev.keystore' -a -d", log: debug)
+  sh("openssl aes-256-cbc -k '#{password}' -in '#{keystore_path}/staging.keystore' -out '#{keystore_dest_path}/staging.keystore' -a -d", log: debug)
+  sh("openssl aes-256-cbc -k '#{password}' -in '#{keystore_path}/production.keystore' -out '#{keystore_dest_path}/production.keystore' -a -d", log: debug)
+  sh("openssl aes-256-cbc -k '#{password}' -in '#{keystore_path}/key.properties' -out '#{keystore_dest_path}/key.properties' -a -d", log: debug)
+
+  # puts "Downloading google service files..."
+  # sh("fastlane google_services", log: debug)
+  # sh("fastlane google_services --env staging", log: debug)
+  # # TODO: Have not setup production yet
+  # sh("fastlane google_services --env production", log: debug)
+
+  puts "Cleaning up..."
+  sh("rm -rf #{temp_dir}", log: debug)
+end
+
+desc "Sync the environment and keystore files to the repository"
+lane :sync_environments do |options|
+  debug = options[:debug] || false
+
+  repository_url = ENV['GIT_ENVIRONMENT_URL'] || prompt(text: "Enter the environment repository url: ")
+
+  temp_dir = root_dir + "/build/temp/keys"
+
+  puts "Cloning..."
+  sh("rm -rf #{temp_dir} && mkdir -p #{temp_dir}", log: debug)
+  sh("git clone #{repository_url} #{temp_dir}", log: debug)
+
+  password = ENV['GIT_ENVIRONMENT_DECRYPT_PASSWORD'] || prompt(text: "Enter the encryption password: ", secure_text: true)
+
+  puts "Encrypting and copying the environment files to the repository..."
+  env_path = root_dir
+  env_dest_path = "#{temp_dir}/envs"
+  sh("openssl aes-256-cbc -k '#{password}' -in '#{env_path}/.env' -out '#{env_dest_path}/.env' -a", log: debug)
+  sh("openssl aes-256-cbc -k '#{password}' -in '#{env_path}/.env.staging' -out '#{env_dest_path}/.env.staging' -a", log: debug)
+
+  puts "Encrypting and copying the keystore files to the repository"
+  keystore_path = "#{root_dir}/android"
+  keystore_dest_path = "#{temp_dir}/keystores"
+  sh("openssl aes-256-cbc -k '#{password}' -in '#{keystore_path}/dev.keystore' -out '#{keystore_dest_path}/dev.keystore' -a", log: debug)
+  sh("openssl aes-256-cbc -k '#{password}' -in '#{keystore_path}/staging.keystore' -out '#{keystore_dest_path}/staging.keystore' -a", log: debug)
+  sh("openssl aes-256-cbc -k '#{password}' -in '#{keystore_path}/key.properties' -out '#{keystore_dest_path}/key.properties' -a", log: debug)
+
+  commit_message = prompt(text: "Enter commit message: ") || "[fastlane] Update environments & keystores"
+
+  puts "Committing and pushing the changes..."
+  sh(
+    "cd #{temp_dir} && " + 
+    "git add envs keystores && " + 
+    "git commit -m '#{commit_message}' && " +
+    "git push",
+    log: debug
+  )
+
+  puts "Cleaning up..."
+  sh("rm -rf #{temp_dir}", log: debug)
+end
+
+## TODO: do iOS
+desc "Downloading and installing the google services files..."
+lane :google_services do
+    android_key_path = "#{root_dir}/android/app/src/#{flavor}/"
+
+    sh("mkdir -p #{android_key_path}")
+
+    firebase_management_download_config(
+        service_account_json_path: root_dir + ENV["FIREBASE_DISTRIBUTION_CREDENTIALS"],
+        type: "android",
+        project_id: ENV["FIREBASE_ANDROID_PROJECT_ID"],
+        app_id: ENV["FIREBASE_ANDROID_APP_ID"],
+        output_path: android_key_path
+    )
+end
+
+platform :ios do
+  workspace_dir = root_dir + "/ios/Runner.xcworkspace"
+  project_dir = root_dir + "/ios/Runner.xcodeproj"
+  match_prefix = "sigh_#{ENV['APP_ID']}_#{ENV['IOS_CERTIFICATE_TYPE']}"
+
+  desc "Install the certificates into the local machine"
+  lane :certificates do
+    username = prompt(text: "Enter the Apple ID for fetching certificates:")
+    
+    ENV["MATCH_PASSWORD"] = ENV["GIT_ENVIRONMENT_DECRYPT_PASSWORD"]
+
+    # register_devices(
+    #   devices_file: root_dir + "/fastlane/assets/devices.txt",
+    #   team_id: ENV["IOS_TEAM_ID"],
+    #   username: username,
+    # )
+
+    match(
+      app_identifier: ENV["APP_ID"],
+      type: ENV["IOS_CERTIFICATE_TYPE"],
+      git_url: ENV["GIT_ENVIRONMENT_URL"],
+      team_id: ENV["IOS_TEAM_ID"],
+      git_branch: "master",
+      username: username,
+      readonly: is_ci,
+      force_for_new_devices: true,
+    )
+
+    # Update the environment variables based on the new certificates
+    ENV["IOS_PROFILE_NAME"] = ENV["#{match_prefix}_profile-name"]
+    ENV["IOS_CODE_SIGN_IDENTITY"] = ENV["#{match_prefix}_certificate-name"]
+  end
+
+  desc "Build the app"
+  private_lane :build do
+
+    cocoapods(
+      podfile: root_dir + "/ios/Podfile",
+    )
+
+    build_app(
+      workspace: workspace_dir,
+      scheme: flavor,
+      configuration: "#{flavor}Release",
+    )
+  end
+
+  desc "Push a new beta build to TestFlight"
+  lane :release_beta do
+    # ensure_build_branch
+
+    certificates
+
+    build
+
+    app_store_connect_api_key(
+      key_id: ENV["IOS_APPSTORE_API_KEY"],
+      issuer_id: ENV["IOS_APPSTORE_ISSUER_ID"],
+      key_filepath: root_dir + ENV["IOS_APPSTORE_AUTH_KEY"],
+      duration: 1200,
+      in_house: false
+    )
+
+    pilot(
+      app_identifier: ENV["APP_ID"],
+      team_id: ENV["IOS_TEAM_ID"],
+      itc_provider: ENV["IOS_TEAM_ID"],
+      uses_non_exempt_encryption: true,
+    )
+
+    notice_release(
+      url: "itms-beta://beta.itunes.apple.com/v1/app/#{ENV['IOS_APP_STORE_ID']}",
+    )
+
+    # upload_symbols_to_crashlytics(
+    #   dsym_path: root_dir + "/Runner.app.dSYM.zip",
+    #   # gsp_path: root_dir + "/ios/GoogleService-Info.plist",
+    #   # binary_path: root_dir + "/ios/Pods/FirebaseCrashlytics/upload-symbols"
+    # )
+
+    clean_build_artifacts
+  end
+
+  desc "Push a new beta build to Testflight"
+  lane :release_testflight do
+    ensure_build_branch
+
+    certificates
+
+    build
+
+    app_store_connect_api_key(
+      key_id: ENV["IOS_APPSTORE_API_KEY"],
+      issuer_id: ENV["IOS_APPSTORE_ISSUER_ID"],
+      key_filepath: root_dir + ENV["IOS_APPSTORE_AUTH_KEY"],
+      duration: 1200,
+      in_house: false
+    )
+
+    pilot(
+      app_identifier: ENV["APP_ID"],
+      team_id: ENV["IOS_TEAM_ID"],
+      itc_provider: ENV["IOS_TEAM_ID"],
+      uses_non_exempt_encryption: true,
+    )
+
+    notice_release(
+      url: "itms-beta://beta.itunes.apple.com/v1/app/#{ENV['IOS_APP_STORE_ID']}",
+    )
+
+    upload_symbols_to_crashlytics(
+      dsym_path: root_dir + "/Runner.app.dSYM.zip",
+      gsp_path: root_dir + "/ios/GoogleService-Info.plist",
+      binary_path: root_dir + "/ios/Pods/FirebaseCrashlytics/upload-symbols"
+    )
+
+    clean_build_artifacts
+  end
+
+end
+
+platform :android do
+    desc "Build release apk file" 
+    lane :build_apk do
+  
+      gradle(
+        task: "clean assemble",
+        build_type: "Release",
+        flavor: flavor,
+        project_dir: root_dir + "/android",
+        system_properties: {
+          "ENVFILE": flavor == "dev" ? ".env" : ".env.#{flavor}"
+        }
+      )
+    end
+  
+    desc "Build release aab file" 
+    lane :build_aab do
+  
+      gradle(
+        task: "clean bundle",
+        build_type: "Release",
+        flavor: flavor,
+        project_dir: root_dir + "/android",
+        system_properties: {
+          "ENVFILE": flavor == "dev" ? ".env" : ".env.#{flavor}"
+        }
+      )
+    end
+
+    desc "Push a new Beta build to Firebase Distribution"
+    lane :release_beta do
+    #   ensure_build_branch
+  
+      build_apk
+  
+      firebase_app_distribution(
+        app: ENV["FIREBASE_ANDROID_APP_ID"],
+        service_credentials_file: root_dir + ENV["FIREBASE_DISTRIBUTION_CREDENTIALS"],
+        android_artifact_path: "#{root_dir}/build/app/outputs/flutter-apk/app-#{flavor}-release.apk",
+        release_notes_file: "#{root_dir}/fastlane/assets/#{flavor}/firebase-release-note.txt",
+        groups_file: "#{root_dir}/fastlane/assets/#{flavor}/firebase-testers-group.txt"
+      )
+  
+      notice_release(
+        url: "https://appdistribution.firebase.google.com/testerapps/#{ENV["FIREBASE_ANDROID_APP_ID"]}",
+      )
+
+    end
+
+    desc "Push a new Production build to Firebase Distribution & Google Play"
+    lane :release_store do
+    #  ensure_build_branch
+      build_apk
+  
+      firebase_app_distribution(
+        app: ENV["FIREBASE_ANDROID_APP_ID"],
+        service_credentials_file: root_dir + ENV["FIREBASE_DISTRIBUTION_CREDENTIALS"],
+        android_artifact_path: "#{root_dir}/build/app/outputs/flutter-apk/app-#{flavor}-release.apk",
+        release_notes_file: "#{root_dir}/fastlane/assets/#{flavor}/firebase-release-note.txt",
+        groups_file: "#{root_dir}/fastlane/assets/#{flavor}/firebase-testers-group.txt"
+      )
+
+      notice_release(
+        url: "https://appdistribution.firebase.google.com/testerapps/#{ENV["FIREBASE_ANDROID_APP_ID"]}",
+      )
+
+    # Upload aab file to Google Play
+      build_aab
+
+      upload_to_play_store(
+        json_key: Dir.pwd + ENV["PLAY_STORE_CREDENTIALS"],
+        package_name: ENV["APP_IDENTIFIER"],
+        track: "internal",
+        aab: "#{root_dir}/build/app/outputs/bundle/#{flavor}Release/app-#{flavor}-release.aab",
+      )
+      system ("sh clean-bundle.sh")
+  
+    end
+end
+
+desc "Ensure the current branch is a build-able branch"
+private_lane :ensure_build_branch do
+  ensure_git_branch(branch: "(^release_.*$|^build_.*$)")
+end
+
+desc "Send a notification to Slack whenever a build is released"
+private_lane :notice_release do |options|
+  installer_url = options[:url]
+
+  platform_name = ENV["FASTLANE_PLATFORM_NAME"].upcase
+  build_flavor = ENV["BUILD_FLAVOR"].upcase
+
+  slack(
+    username: "Minglo Career Release Bot",
+    message: "🎉 A new version of *#{platform_name} - #{build_flavor}* Minglo Career is available! 🎉",
+    default_payloads: [],
+    payload: {
+      "Build Date" => Time.new.to_s,
+      "Platform" => platform_name,
+      "Environment" => build_flavor,
+      "App Name" => ENV["APP_NAME"],
+      "App Version" => "#{ENV["APP_VERSION_NAME"]} (#{ENV["APP_VERSION_CODE"]})",
+      "Installer" => installer_url,
+    },
+    success: flavor != "production", # Show the red line in Slack only if the build is a production build
+    fail_on_error: false,
+  )
+end
